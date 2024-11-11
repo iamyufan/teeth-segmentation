@@ -1,0 +1,6 @@
+# Ignore everything under "data" directory
+data/*
+wandb/*
+.DS_Store
+*.ipynb
+*.pyc
