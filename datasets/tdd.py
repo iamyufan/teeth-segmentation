@@ -1,104 +1,126 @@
 import os
 import json
 import torch
-from torch.utils.data import Dataset, DataLoader
-from PIL import Image, ImageDraw
 import numpy as np
+import matplotlib.pyplot as plt
+from torch.utils.data import Dataset, DataLoader
+from PIL import Image
+
+
+DATA_ROOT = "./Tufts_Dental_Database"
+IMAGE_DIR = os.path.join(DATA_ROOT, "Radiographs")
+MASKS_DIR = os.path.join(DATA_ROOT, "Transformed_masks")
+ANNOTATION_PATH = os.path.join(DATA_ROOT, "Segmentation", "teeth_bbox.json")
 
 
 class TuftsDentalDataset(Dataset):
-    def __init__(self, annotations, image_dir, transforms=None):
+    def __init__(self, annotations, image_dir, masks_dir, transforms=None):
         self.annotations = annotations
         self.image_dir = image_dir
+        self.masks_dir = masks_dir
         self.transforms = transforms
 
     def __len__(self):
         return len(self.annotations)
 
     def __getitem__(self, idx):
-        # Get annotation and image path
+        """
+        Returns
+        -------
+        image : torch.Tensor
+            The image tensor of shape (C, H, W).
+        target : dict
+            The target dictionary containing the following keys:
+            - boxes (torch.Tensor):
+                The bounding box coordinates of shape (N, 4)
+            - labels (torch.Tensor): The label of each bounding box of shape (N,).
+            - masks (torch.Tensor): The segmentation masks of shape (N, H, W).
+        """
+        # Get the annotation and image & mask paths
         annotation = self.annotations[idx]
-        img_path = os.path.join(self.image_dir, annotation["External ID"])
-        image = np.array(Image.open(img_path).convert("RGB"))
-        image = image.astype(np.float32) / 255.0
+        img_idx = annotation["External ID"].split(".")[0]
+        image_path = os.path.join(self.image_dir, img_idx + ".JPG")
+        mask_path = os.path.join(self.masks_dir, img_idx + ".npy")
 
-        # Parse polygons for masks
-        objects = annotation["Label"]["objects"]
+        # Load the image and mask
+        image = np.array(Image.open(image_path).convert("RGB"))
+        image = image.astype(np.float32) / 255.0
+        stored_mask = np.load(mask_path)
+
+        # Get the targets (boxes, labels, masks) for each instance
         masks = []
         boxes = []
         labels = []
 
-        for obj in objects:
+        for i, obj in enumerate(annotation["Label"]["objects"]):
             # Exclude objects whose title is not integer
             if not obj["title"].isdigit():
                 continue
 
-            # Get the polygons and convert to a mask
-            polygons = obj["polygons"]
-            mask = self.polygons_to_mask(polygons, (image.shape[1], image.shape[0]))
-            masks.append(mask)
+            # Convert the mask into multiple binary masks
+            # The stored mask is a 2D array, where each pixel value is
+            # one unique instance. The pixel value is incremented by one
+            # for each new instance from 1
+            # i.e., the pixel with value i + 1 is the mask for the i-th instance
+            mask = stored_mask == (i + 1)
+            masks.append(mask.astype(np.uint8))
 
-            # Get the bounding box
+            # Get the bounding box coordinates
             y_min, x_min, y_max, x_max = obj["bounding box"]
             boxes.append([x_min, y_min, x_max, y_max])
 
-            # Use the 'title' as the class label
+            # Use the title as the label
             labels.append(int(obj["title"]))
 
-        # Convert everything to PyTorch tensors
+        # Convert everything into a torch.Tensor
         image = torch.as_tensor(image, dtype=torch.float32).permute(2, 0, 1)
-        masks = torch.as_tensor(np.stack(masks), dtype=torch.uint8)
+        masks = torch.as_tensor(np.stack(masks, axis=0), dtype=torch.uint8)
         boxes = torch.as_tensor(boxes, dtype=torch.float32)
         labels = torch.as_tensor(labels, dtype=torch.int64)
 
         # Create the target dictionary
-        target = {
-            "boxes": boxes,
-            "labels": labels,
-            "masks": masks,
-        }
+        target = {"boxes": boxes, "labels": labels, "masks": masks}
 
-        if self.transforms:
+        # Apply the transforms if any
+        if self.transforms is not None:
             image, target = self.transforms(image, target)
 
         return image, target
 
-    @staticmethod
-    def polygons_to_mask(polygons, image_size):
-        """
-        Converts polygons to a binary mask.
-        Args:
-            polygons (list): List of polygons, where each polygon is a list of [x, y] points.
-            image_size (tuple): Size of the image (width, height).
-        Returns:
-            np.ndarray: Binary mask of the object.
-        """
-        mask = Image.new("L", image_size, 0)
-        draw = ImageDraw.Draw(mask)
+    def visualize_one_sample(self, idx, target_idx=0):
+        sample = self.__getitem__(idx)
+        sample_image = sample[0].numpy().transpose(1, 2, 0)
+        sample_target = sample[1]
 
-        for polygon in polygons:
-            # Flatten the polygon coordinates
-            if len(polygon) > 2:  # Ensure it is a valid polygon
-                flat_polygon = [tuple(point) for point in polygon]
-                draw.polygon(flat_polygon, outline=1, fill=1)
+        print(sample_target["boxes"].shape)
+        print(sample_target["labels"].shape)
+        print(sample_target["masks"].shape)
 
-        return np.array(mask)
+        # Visualize the first bounding box and the first mask with pyplot
+        box = sample_target["boxes"][target_idx].numpy()
+        mask = sample_target["masks"][target_idx].numpy().squeeze()
 
-    @staticmethod
-    def get_bounding_box(mask):
-        """
-        Get the bounding box of a binary mask.
-        Args:
-            mask (np.ndarray): Binary mask of the object.
-        Returns:
-            list: Bounding box in [xmin, ymin, xmax, ymax] format.
-        """
-        pos = np.where(mask)
-        xmin = np.min(pos[1])
-        ymin = np.min(pos[0])
-        xmax = np.max(pos[1])
-        ymax = np.max(pos[0])
-        return [xmin, ymin, xmax, ymax]
+        # Visualize the bounding box with pyplot
+        x_min, y_min, x_max, y_max = box
+
+        plt.figure(figsize=(10, 10))
+        plt.imshow(sample_image)
+        plt.axis("off")
+        plt.gca().add_patch(
+            plt.Rectangle(
+                (x_min, y_min),
+                x_max - x_min,
+                y_max - y_min,
+                fill=False,
+                edgecolor="red",
+                lw=2,
+            )
+        )
+
+        # Visualize the mask with pyplot
+        plt.figure(figsize=(10, 10))
+        plt.imshow(mask, cmap="gray")
+        plt.axis("off")
 
 
 def collate_fn(batch):
@@ -107,29 +129,32 @@ def collate_fn(batch):
     Args:
         batch (list): List of tuples (image, target).
     Returns:
-        images (list): List of images.
-        targets (list): List of target dictionaries.
+        tuple: A tuple containing the images and targets.
     """
-    images, targets = zip(*batch)
-    return list(images), list(targets)
+    return tuple(zip(*batch))
 
 
 class TuftsDentalDataModule:
-    def __init__(self, annotations_path, image_dir, batch_size=4):
+    def __init__(
+        self,
+        annotations_path=ANNOTATION_PATH,
+        image_dir=IMAGE_DIR,
+        masks_dir=MASKS_DIR,
+        batch_size=4,
+    ):
         self.annotations_path = annotations_path
         self.image_dir = image_dir
+        self.masks_dir = masks_dir
         self.batch_size = batch_size
+        self.setup()
 
     def setup(self):
         # Load annotations
         with open(self.annotations_path, "r") as f:
-            self.annotations = json.load(f)
-            
-        # # Only use the first 100 annotations for demonstration purposes
-        # self.annotations = self.annotations[:100]
+            annotations = json.load(f)
 
         # Filter out annotations without objects
-        self.annotations = [ann for ann in self.annotations if ann["Label"]["objects"]]
+        self.annotations = [ann for ann in annotations if ann["Label"]["objects"]]
 
         # Randomly sample 80% of the data for training and 20% for validation
         num_samples = len(self.annotations)
@@ -143,8 +168,14 @@ class TuftsDentalDataModule:
         self.val_annotations = [self.annotations[i] for i in val_indices]
 
         # Initialize the datasets
-        self.train_dataset = TuftsDentalDataset(self.train_annotations, self.image_dir)
-        self.val_dataset = TuftsDentalDataset(self.val_annotations, self.image_dir)
+        self.train_dataset = TuftsDentalDataset(
+            self.train_annotations, self.image_dir, self.masks_dir
+        )
+        self.val_dataset = TuftsDentalDataset(
+            self.val_annotations, self.image_dir, self.masks_dir
+        )
+        print("Training samples:", len(self.train_dataset))
+        print("Validation samples:", len(self.val_dataset))
 
     def train_dataloader(self):
         return DataLoader(
