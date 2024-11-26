@@ -125,8 +125,8 @@ class TuftsDentalDataModule:
         with open(self.annotations_path, "r") as f:
             self.annotations = json.load(f)
             
-        # Only use the first 100 annotations for demonstration purposes
-        self.annotations = self.annotations[:100]
+        # # Only use the first 100 annotations for demonstration purposes
+        # self.annotations = self.annotations[:100]
 
         # Filter out annotations without objects
         self.annotations = [ann for ann in self.annotations if ann["Label"]["objects"]]
