@@ -107,7 +107,6 @@ class MaskRCNNModel:
             # Train for one epoch
             avg_epoch_loss = self._train_one_epoch(train_loader, epoch)
             self.train_loss_list.append(avg_epoch_loss)
-
             # Print loss for the epoch
             print(f"Epoch {epoch+1} \t Loss: {avg_epoch_loss}")
 
